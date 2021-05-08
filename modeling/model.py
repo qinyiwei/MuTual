@@ -7,12 +7,14 @@ import math
 import torch.nn.utils.rnn as rnn_utils
 
 class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
-    def __init__(self, config, add_GRU=True, bidirectional=False, word_level=True, add_cls = False):
+    def __init__(self, config, add_GRU=True, bidirectional=False, word_level=False, add_cls = True, word_and_sent=True):
         super().__init__(config)
         self.electra = ElectraModel(config)
         feature_dim = config.hidden_size
         if bidirectional:
             feature_dim += config.hidden_size
+        if word_and_sent:
+            feature_dim *= 2
         if add_cls:
             feature_dim += config.hidden_size
         self.pooler = nn.Linear(feature_dim, config.hidden_size)
@@ -24,13 +26,17 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
         self.word_level = word_level
         self.add_cls = add_cls
         self.bidirectional = bidirectional
+        self.word_and_sent = word_and_sent
         if self.add_GRU:
             self.gru = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
+        if self.word_and_sent:
+            self.gru2 = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
         self.init_weights()
         print("add_GRU is: "+str(add_GRU))
         print("bidirectional is: "+str(bidirectional))
         print("word_level is:"+str(word_level))
         print("add_cls is:"+str(add_cls))
+        print("word_and_sent is:"+str(word_and_sent))
 
     def forward(
         self,
@@ -88,32 +94,57 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
         sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
         cls_rep = sequence_output[:,0]
         if self.add_GRU:
-            if self.word_level:
-                sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
-                sequence_output,last_state = self.gru(sequence_output)
-                sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
-                if(self.bidirectional):
-                    last_state = torch.cat([last_state[0],last_state[1]],dim=1)
-                #index = torch.LongTensor(input_length).unsqueeze(-1).unsqueeze(-1).expand(-1,-1,sequence_output.shape[-1]).to(self.device)
-                #last_state = torch.gather(sequence_output, index=index-1, dim=1).squeeze(1)
-                if(self.add_cls):
-                    feature = torch.cat([cls_rep, last_state])
-                else:
-                    feature = last_state
+            if self.word_and_sent:
+                    sequence_output_sent = sequence_output
+                    sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
+                    sequence_output,last_state_word = self.gru(sequence_output)
+                    sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
+                    if(self.bidirectional):
+                        last_state_word = torch.cat([last_state_word[0],last_state_word[1]],dim=1)
+                    else:
+                        last_state_word = last_state_word.squeeze(0)
+
+                    index = sep_pos.unsqueeze(-1).expand(-1,-1,sequence_output_sent.shape[-1])
+                    sequence_output_sent = torch.gather(sequence_output_sent, index=index, dim=1)
+                    sequence_output_sent = torch.nn.utils.rnn.pack_padded_sequence(sequence_output_sent, lengths=input_length,enforce_sorted = False,batch_first=True)
+                    sequence_output_sent,last_state_sent = self.gru2(sequence_output_sent)
+                    sequence_output_sent, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output_sent,batch_first=True)
+                    if(self.bidirectional):
+                        last_state_sent = torch.cat([last_state_sent[0],last_state_sent[1]],dim=1)
+                    else:
+                        last_state_sent = last_state_sent.squeeze(0)
+                    last_state = torch.cat([last_state_word,last_state_sent],dim=1)
+                    if(self.add_cls):
+                        feature = torch.cat([cls_rep, last_state],dim=1)
+                    else:
+                        feature = last_state
             else:
-                index = sep_pos.unsqueeze(-1).expand(-1,-1,sequence_output.shape[-1])
-                sequence_output = torch.gather(sequence_output, index=index, dim=1)
-                sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
-                sequence_output,last_state = self.gru(sequence_output)
-                sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
-                if(self.bidirectional):
-                    last_state = torch.cat([last_state[0],last_state[1]],dim=1)
-                #index = torch.LongTensor(input_length).unsqueeze(-1).unsqueeze(-1).expand(-1,-1,sequence_output.shape[-1]).to(self.device)
-                #last_state = torch.gather(sequence_output, index=index-1, dim=1).squeeze(1)
-                if(self.add_cls):
-                    feature = torch.cat([cls_rep, last_state],dim=1)
+                if self.word_level:
+                    sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
+                    sequence_output,last_state = self.gru(sequence_output)
+                    sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
+                    if(self.bidirectional):
+                        last_state = torch.cat([last_state[0],last_state[1]],dim=1)
+                    else:
+                        last_state = last_state.squeeze(0)
+                    if(self.add_cls):
+                        feature = torch.cat([cls_rep, last_state],dim=1)
+                    else:
+                        feature = last_state
                 else:
-                    feature = last_state
+                    index = sep_pos.unsqueeze(-1).expand(-1,-1,sequence_output.shape[-1])
+                    sequence_output = torch.gather(sequence_output, index=index, dim=1)
+                    sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
+                    sequence_output,last_state = self.gru(sequence_output)
+                    sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
+                    if(self.bidirectional):
+                        last_state = torch.cat([last_state[0],last_state[1]],dim=1)
+                    else:
+                        last_state = last_state.squeeze(0)
+                    if(self.add_cls):
+                        feature = torch.cat([cls_rep, last_state],dim=1)
+                    else:
+                        feature = last_state
         else:
             feature = cls_rep
         

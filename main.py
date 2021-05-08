@@ -602,6 +602,9 @@ def main():
     parser = argparse.ArgumentParser()
 
     ## Required parameters
+    parser.add_argument("--speaker_aware",
+                        action='store_true',
+                        help="Whether not to use speaker aware embedding")
     parser.add_argument("--data_dir",
                         default='../../../MuTual/data/mutual',
                         type=str,
@@ -943,9 +946,10 @@ def main():
             nb_tr_steps = 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
+                token_type_ids = batch[4]%2 if args.speaker_aware else None
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
-                          'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet', 'albert'] else None, # XLM don't use segment_ids
+                          'token_type_ids': token_type_ids,
                           'sep_pos': batch[3],
                           'turn_ids': batch[4],
                           'labels': batch[5]}
@@ -1003,9 +1007,10 @@ def main():
                 batch = tuple(t.to(device) for t in batch)
 
                 with torch.no_grad():
+                    token_type_ids = batch[4]%2 if args.speaker_aware else None
                     inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
-                          'token_type_ids': batch[2] if args.model_type in ['bert', 'xlnet', 'albert'] else None, # XLM don't use segment_ids
+                          'token_type_ids': token_type_ids,
                           'sep_pos': batch[3],
                           'turn_ids': batch[4],
                           'labels': batch[5]}
