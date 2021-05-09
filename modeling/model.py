@@ -6,8 +6,42 @@ import torch.nn.functional as F
 import math
 import torch.nn.utils.rnn as rnn_utils
 
+class GRUWithPadding(nn.Module):
+    def __init__(self, config, num_rnn = 1):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.num_layers = num_rnn
+        self.biGRU = nn.GRU(config.hidden_size, config.hidden_size, self.num_layers, batch_first = True, bidirectional = False)
+
+    def forward(self, inputs):
+        batch_size = len(inputs)
+        sorted_inputs = sorted(enumerate(inputs), key=lambda x: x[1].size(0), reverse = True)
+        idx_inputs = [i[0] for i in sorted_inputs]
+        inputs = [i[1] for i in sorted_inputs]
+        inputs_lengths = [len(i[1]) for i in sorted_inputs]
+
+        inputs = rnn_utils.pad_sequence(inputs, batch_first = True)
+        inputs = rnn_utils.pack_padded_sequence(inputs, inputs_lengths, batch_first = True) #(batch_size, seq_len, hidden_size)
+
+        h0 = torch.rand(self.num_layers, batch_size, self.hidden_size).to(inputs.data.device) # (2, batch_size, hidden_size)
+        self.biGRU.flatten_parameters()
+        out, _ = self.biGRU(inputs, h0) # (batch_size, 2, hidden_size )
+        out_pad, out_len = rnn_utils.pad_packed_sequence(out, batch_first = True) # (batch_size, seq_len, 2 * hidden_size)
+
+        _, idx2 = torch.sort(torch.tensor(idx_inputs))
+        idx2 = idx2.to(out_pad.device)
+        output = torch.index_select(out_pad, 0, idx2)
+        out_len = out_len.to(out_pad.device)
+        out_len = torch.index_select(out_len, 0, idx2)
+
+        #out_idx = (out_len - 1).unsqueeze(1).unsqueeze(2).repeat([1,1,self.hidden_size*2])
+        out_idx = (out_len - 1).unsqueeze(1).unsqueeze(2).repeat([1,1,self.hidden_size])
+        output = torch.gather(output, 1, out_idx).squeeze(1)
+
+        return output
+    
 class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
-    def __init__(self, config, add_GRU=True, bidirectional=False, word_level=False, add_cls = True, word_and_sent=True):
+    def __init__(self, config, add_GRU=True, bidirectional=False, word_level=False, add_cls = False, word_and_sent=False):
         super().__init__(config)
         self.electra = ElectraModel(config)
         feature_dim = config.hidden_size
@@ -28,7 +62,8 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
         self.bidirectional = bidirectional
         self.word_and_sent = word_and_sent
         if self.add_GRU:
-            self.gru = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
+            self.gru = GRUWithPadding(config)
+            #self.gru = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
         if self.word_and_sent:
             self.gru2 = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
         self.init_weights()
@@ -119,7 +154,7 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
                     else:
                         feature = last_state
             else:
-                if self.word_level:
+                if self.word_level:#word_level GRU
                     sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
                     sequence_output,last_state = self.gru(sequence_output)
                     sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
@@ -131,20 +166,24 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
                         feature = torch.cat([cls_rep, last_state],dim=1)
                     else:
                         feature = last_state
-                else:
-                    index = sep_pos.unsqueeze(-1).expand(-1,-1,sequence_output.shape[-1])
-                    sequence_output = torch.gather(sequence_output, index=index, dim=1)
-                    sequence_output = torch.nn.utils.rnn.pack_padded_sequence(sequence_output, lengths=input_length,enforce_sorted = False,batch_first=True)
-                    sequence_output,last_state = self.gru(sequence_output)
-                    sequence_output, _ = torch.nn.utils.rnn.pad_packed_sequence(sequence_output,batch_first=True)
-                    if(self.bidirectional):
-                        last_state = torch.cat([last_state[0],last_state[1]],dim=1)
-                    else:
-                        last_state = last_state.squeeze(0)
-                    if(self.add_cls):
-                        feature = torch.cat([cls_rep, last_state],dim=1)
-                    else:
-                        feature = last_state
+                else:#sent_level GRU
+                    context_utterance_level = []
+                    batch_size = sequence_output.size(0)
+                    utter_size = sep_pos.shape[1]
+                    for batch_idx in range(batch_size):
+                        context_utterances = [torch.max(sequence_output[batch_idx, :(sep_pos[batch_idx][0] + 1)], dim=0, keepdim=True)[0]]
+                        for j in range(1, utter_size):
+                            if sep_pos[batch_idx][j] == 0:
+                                #context_utterances.append(topic_output[batch_idx].unsqueeze(0))
+                                break
+                            current_context_utter, _ = torch.max(sequence_output[batch_idx, (sep_pos[batch_idx][j - 1] + 1):(sep_pos[batch_idx][j] + 1)],
+                                                                dim=0, keepdim=True)
+
+                            context_utterances.append(current_context_utter)
+                        context_utterance_level.append(
+                            torch.cat(context_utterances, dim=0))  # (batch_size, utterances, hidden_size)
+                    gru_output = self.gru(context_utterance_level)
+                    feature = gru_output
         else:
             feature = cls_rep
         
