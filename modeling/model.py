@@ -7,11 +7,12 @@ import math
 import torch.nn.utils.rnn as rnn_utils
 
 class GRUWithPadding(nn.Module):
-    def __init__(self, config, num_rnn = 1):
+    def __init__(self, config, num_rnn = 1, bidirectional=False):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.num_layers = num_rnn
-        self.biGRU = nn.GRU(config.hidden_size, config.hidden_size, self.num_layers, batch_first = True, bidirectional = False)
+        self.biGRU = nn.GRU(config.hidden_size, config.hidden_size, self.num_layers, batch_first = True, bidirectional = bidirectional) 
+        self.bidirectional = bidirectional
 
     def forward(self, inputs):
         batch_size = len(inputs)
@@ -23,7 +24,7 @@ class GRUWithPadding(nn.Module):
         inputs = rnn_utils.pad_sequence(inputs, batch_first = True)
         inputs = rnn_utils.pack_padded_sequence(inputs, inputs_lengths, batch_first = True) #(batch_size, seq_len, hidden_size)
 
-        h0 = torch.rand(self.num_layers, batch_size, self.hidden_size).to(inputs.data.device) # (2, batch_size, hidden_size)
+        h0 = torch.rand(self.num_layers*(2 if self.bidirectional else 1), batch_size, self.hidden_size).to(inputs.data.device) # (2, batch_size, hidden_size)
         self.biGRU.flatten_parameters()
         out, _ = self.biGRU(inputs, h0) # (batch_size, 2, hidden_size )
         out_pad, out_len = rnn_utils.pad_packed_sequence(out, batch_first = True) # (batch_size, seq_len, 2 * hidden_size)
@@ -34,13 +35,143 @@ class GRUWithPadding(nn.Module):
         out_len = out_len.to(out_pad.device)
         out_len = torch.index_select(out_len, 0, idx2)
 
-        #out_idx = (out_len - 1).unsqueeze(1).unsqueeze(2).repeat([1,1,self.hidden_size*2])
-        out_idx = (out_len - 1).unsqueeze(1).unsqueeze(2).repeat([1,1,self.hidden_size])
+        if self.bidirectional:
+            out_idx = (out_len - 1).unsqueeze(1).unsqueeze(2).repeat([1,1,self.hidden_size*2])
+        else:
+            out_idx = (out_len - 1).unsqueeze(1).unsqueeze(2).repeat([1,1,self.hidden_size])
         output = torch.gather(output, 1, out_idx).squeeze(1)
 
         return output
     
 class ElectraForMultipleChoice(ElectraPreTrainedModel):
+    def __init__(self, config, add_GRU= True, bidirectional=True, add_cls = True):
+        super().__init__(config)
+        self.electra = ElectraModel(config)
+        feature_dim = config.hidden_size
+        if bidirectional:
+            feature_dim += config.hidden_size
+        if add_cls:
+            feature_dim += config.hidden_size
+        self.pooler = nn.Linear(feature_dim, config.hidden_size)
+        self.pooler_activation = nn.Tanh()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.classifier2 = nn.Linear(config.hidden_size, 2)
+
+        self.add_cls = add_cls
+        self.bidirectional = bidirectional
+        self.add_GRU = add_GRU
+            
+        if self.add_GRU:
+            self.gru = GRUWithPadding(config,bidirectional=bidirectional)
+
+
+        self.init_weights()
+        print("add_GRU is: "+str(add_GRU))
+        print("bidirectional is: "+str(bidirectional))
+        print("add_cls is:"+str(add_cls))
+
+    def forward(
+        self,
+        input_ids=None,
+        token_type_ids=None,
+        attention_mask=None,
+        sep_pos = None,
+        position_ids=None,
+        turn_ids = None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+    ):
+        num_labels = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
+
+        input_ids = input_ids.view(-1, input_ids.size(-1)) if input_ids is not None else None 
+        attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        # (batch_size * choice, seq_len)
+        token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        sep_pos = sep_pos.view(-1, sep_pos.size(-1)) if sep_pos is not None else None
+        turn_ids = turn_ids.view(-1, turn_ids.size(-1)) if turn_ids is not None else None
+        
+        turn_ids = turn_ids.unsqueeze(-1).repeat([1,1,turn_ids.size(1)])
+        
+        position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+        inputs_embeds = (
+            inputs_embeds.view(-1, inputs_embeds.size(-2), inputs_embeds.size(-1))
+            if inputs_embeds is not None
+            else None
+        )
+        attention_mask = attention_mask.unsqueeze(1).unsqueeze(2) # (batch_size * num_choice, 1, 1, seq_len)
+        attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+
+        attention_mask = (1.0 - attention_mask) * -10000.0
+
+        outputs = self.electra(
+            input_ids,
+            attention_mask=attention_mask.squeeze(1),
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+        sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
+        cls_rep = sequence_output[:,0]
+
+        if self.add_GRU:
+            context_utterance_level = []
+            batch_size = sequence_output.size(0)
+            utter_size = sep_pos.shape[1]
+            for batch_idx in range(batch_size):
+                context_utterances = [torch.max(sequence_output[batch_idx, :(sep_pos[batch_idx][0] + 1)], dim=0, keepdim=True)[0]]
+
+                for j in range(1, utter_size):
+                    if sep_pos[batch_idx][j] == 0:
+                        #context_utterances.append(topic_output[batch_idx].unsqueeze(0))
+                        break
+                    current_context_utter, _ = torch.max(sequence_output[batch_idx, (sep_pos[batch_idx][j - 1] + 1):(sep_pos[batch_idx][j] + 1)],
+                                                        dim=0, keepdim=True)
+
+                    context_utterances.append(current_context_utter)
+
+
+                context_utterance_level.append(
+                    torch.cat(context_utterances, dim=0))  # (batch_size, utterances, hidden_size)
+
+            feature = self.gru(context_utterance_level)
+        else:
+            feature = sequence_output
+
+        if(self.add_cls):
+            feature = torch.cat([cls_rep, feature],dim=1)
+
+        pooled_output = self.pooler_activation(self.pooler(feature))
+        pooled_output = self.dropout(pooled_output)
+        
+        if num_labels > 2:
+            logits = self.classifier(pooled_output)
+        else:
+            logits = self.classifier2(pooled_output)
+
+        reshaped_logits = logits.view(-1, num_labels) if num_labels > 2 else logits
+
+        outputs = (reshaped_logits,) + outputs[2:]  # add hidden states and attention if they are here
+
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
+            outputs = (loss,) + outputs
+
+        return outputs #(loss), reshaped_logits, (hidden_states), (attentions)
+
+    @property
+    def device(self):
+        return self.pooler.weight.device
+
+class ElectraForMultipleChoiceOther(ElectraPreTrainedModel):
     def __init__(self, config, add_GRU=True, bidirectional=False, word_level=False, add_cls = False, word_and_sent=False):
         super().__init__(config)
         self.electra = ElectraModel(config)
@@ -211,7 +342,7 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):
         return self.pooler.weight.device
 
 class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
-    def __init__(self, config, num_rnn = 1):
+    def __init__(self, config, num_rnn = 1,bidirectional=True,add_cls=False):
         super().__init__(config)
 
         self.electra = ElectraModel(config)
@@ -221,16 +352,24 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
 
         #self.fuse2 = FuseLayer(config)
         
-        self.gru1 = GRUWithPadding(config, num_rnn)
-        self.gru2 = GRUWithPadding(config, num_rnn)
-        self.gru3 = GRUWithPadding(config, num_rnn)
+        self.gru1 = GRUWithPadding(config, num_rnn, bidirectional)
+        self.gru2 = GRUWithPadding(config, num_rnn, bidirectional)
+        self.gru3 = GRUWithPadding(config, num_rnn, bidirectional)
 
-        self.pooler = nn.Linear(3 * config.hidden_size, config.hidden_size)
+        feature_dim = config.hidden_size * 3
+        if bidirectional:
+            feature_dim *= 2
+        if add_cls:
+            feature_dim += config.hidden_size
+        self.pooler = nn.Linear(feature_dim , config.hidden_size)
         self.pooler_activation = nn.Tanh()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, 1)
         self.classifier2 = nn.Linear(config.hidden_size, 2)
 
+        self.bidirectional = bidirectional
+        self.add_cls = add_cls
+        
         self.init_weights()
 
     def forward(
@@ -317,7 +456,8 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
         )
 
         sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
-
+        cls_rep = sequence_output[:,0]
+        
         sa_self_word_level = self.SASelfMHA(sequence_output, sequence_output, attention_mask = sa_self_mask)[0]
         sa_cross_word_level = self.SACrossMHA(sequence_output, sequence_output, attention_mask = sa_cross_mask)[0]
 
@@ -354,6 +494,8 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
         sa_final_states2 = self.gru3(sa_utterance_level2) # (batch_size * num_choice, 2 * hidden_size)
 
         final_state = torch.cat((context_final_states, sa_final_states, sa_final_states2), 1)
+        if(self.add_cls):
+            final_state = torch.cat([cls_rep, final_state],dim=1)
 
         pooled_output = self.pooler_activation(self.pooler(final_state))
         pooled_output = self.dropout(pooled_output)
