@@ -39,8 +39,9 @@ from sklearn.metrics import matthews_corrcoef, f1_score
 
 from transformers import (BertConfig, BertForMultipleChoice, BertTokenizer,
                             ElectraConfig, ElectraTokenizer, RobertaConfig, RobertaTokenizer, RobertaForMultipleChoice)
-from modeling import (ElectraForMultipleChoicePlus, BertBaseline, RobertaBaseline, BertForMultipleChoicePlus, RobertaForMultipleChoicePlus)
-from modeling.model import ElectraForMultipleChoicePlus as Baseline
+from modeling import (BertBaseline, RobertaBaseline, BertForMultipleChoicePlus, RobertaForMultipleChoicePlus)
+from modeling.model import ElectraForMultipleChoice as Baseline
+from modeling.model import ElectraForMultipleChoicePlus as ElectraForMultipleChoicePlus
 
 from transformers import (AdamW, WEIGHTS_NAME, CONFIG_NAME)
 import re
