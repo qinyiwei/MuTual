@@ -7,11 +7,11 @@ import math
 import torch.nn.utils.rnn as rnn_utils
 
 class GRUWithPadding(nn.Module):
-    def __init__(self, config, num_rnn = 1, bidirectional=False):
+    def __init__(self, hidden_size, num_rnn = 1, bidirectional=False):
         super().__init__()
-        self.hidden_size = config.hidden_size
+        self.hidden_size = hidden_size
         self.num_layers = num_rnn
-        self.biGRU = nn.GRU(config.hidden_size, config.hidden_size, self.num_layers, batch_first = True, bidirectional = bidirectional) 
+        self.biGRU = nn.GRU(hidden_size, hidden_size, self.num_layers, batch_first = True, bidirectional = bidirectional) 
         self.bidirectional = bidirectional
 
     def forward(self, inputs):
@@ -63,7 +63,7 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):
         self.add_GRU = add_GRU
             
         if self.add_GRU:
-            self.gru = GRUWithPadding(config,bidirectional=bidirectional)
+            self.gru = GRUWithPadding(config.hidden_size,bidirectional=bidirectional)
 
 
         self.init_weights()
@@ -193,7 +193,7 @@ class ElectraForMultipleChoiceOther(ElectraPreTrainedModel):
         self.bidirectional = bidirectional
         self.word_and_sent = word_and_sent
         if self.add_GRU:
-            self.gru = GRUWithPadding(config)
+            self.gru = GRUWithPadding(config.hidden_size)
             #self.gru = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
         if self.word_and_sent:
             self.gru2 = nn.GRU(config.hidden_size,config.hidden_size,num_layers=1,batch_first = True, bidirectional=bidirectional)
@@ -341,8 +341,8 @@ class ElectraForMultipleChoiceOther(ElectraPreTrainedModel):
     def device(self):
         return self.pooler.weight.device
 
-class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
-    def __init__(self, config, num_rnn = 1,bidirectional=True,add_cls=False):
+class ElectraForMultipleChoiceDecouple(ElectraPreTrainedModel):#SA decouple + GRU
+    def __init__(self, config, num_rnn = 1,bidirectional=True, add_mask = True):
         super().__init__(config)
 
         self.electra = ElectraModel(config)
@@ -350,17 +350,19 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
         self.SASelfMHA = MHA(config)
         self.SACrossMHA = MHA(config)
 
-        #self.fuse2 = FuseLayer(config)
         
-        self.gru1 = GRUWithPadding(config, num_rnn, bidirectional)
-        self.gru2 = GRUWithPadding(config, num_rnn, bidirectional)
-        self.gru3 = GRUWithPadding(config, num_rnn, bidirectional)
+        self.gru1 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
+        self.gru2 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
+        if not add_mask:
+            self.gru3 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
 
-        feature_dim = config.hidden_size * 3
+        if add_mask:
+            feature_dim = config.hidden_size * 2
+        else:
+            feature_dim = config.hidden_size * 3
+
         if bidirectional:
             feature_dim *= 2
-        if add_cls:
-            feature_dim += config.hidden_size
         self.pooler = nn.Linear(feature_dim , config.hidden_size)
         self.pooler_activation = nn.Tanh()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -368,7 +370,9 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
         self.classifier2 = nn.Linear(config.hidden_size, 2)
 
         self.bidirectional = bidirectional
-        self.add_cls = add_cls
+        self.add_mask = add_mask
+        print("bidirectional is: "+str(bidirectional))
+        print("add_mask is: "+str(add_mask))
         
         self.init_weights()
 
@@ -456,46 +460,52 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
         )
 
         sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
-        cls_rep = sequence_output[:,0]
         
         sa_self_word_level = self.SASelfMHA(sequence_output, sequence_output, attention_mask = sa_self_mask)[0]
         sa_cross_word_level = self.SACrossMHA(sequence_output, sequence_output, attention_mask = sa_cross_mask)[0]
 
 
         context_word_level = sequence_output
-        sa_word_level = sa_self_word_level
-        sa_word_level2 = sa_cross_word_level
+        if self.add_mask:
+            sa_word_level = sa_self_word_level+sa_cross_word_level
+        else:
+            sa_word_level = sa_self_word_level
+            sa_word_level2 = sa_cross_word_level
 
         new_batch = []
 
         context_utterance_level = []
         sa_utterance_level = []
-        sa_utterance_level2 = []
+        if not self.add_mask:
+            sa_utterance_level2 = []
 
         for i in range(sequence_output.size(0)):
             context_utterances = [torch.max(context_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
             sa_utterances = [torch.max(sa_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
-            sa_utterances2 = [torch.max(sa_word_level2[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
+            if not self.add_mask:
+                sa_utterances2 = [torch.max(sa_word_level2[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
 
             for j in range(1, last_seps[i] + 1):
                 current_context_utter, _ = torch.max(context_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
                 current_sa_utter, _ = torch.max(sa_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
-                current_sa_utter2, _ = torch.max(sa_word_level2[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
                 context_utterances.append(current_context_utter)
                 sa_utterances.append(current_sa_utter)
-                sa_utterances2.append(current_sa_utter2)
+                if not self.add_mask:
+                    current_sa_utter2, _ = torch.max(sa_word_level2[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
+                    sa_utterances2.append(current_sa_utter2)
 
             context_utterance_level.append(torch.cat(context_utterances, dim = 0)) # (batch_size, utterances, hidden_size)
             sa_utterance_level.append(torch.cat(sa_utterances, dim = 0))
-            sa_utterance_level2.append(torch.cat(sa_utterances2, dim = 0))
+            if not self.add_mask:
+                sa_utterance_level2.append(torch.cat(sa_utterances2, dim = 0))
 
         context_final_states = self.gru1(context_utterance_level) 
         sa_final_states = self.gru2(sa_utterance_level) # (batch_size * num_choice, 2 * hidden_size)
-        sa_final_states2 = self.gru3(sa_utterance_level2) # (batch_size * num_choice, 2 * hidden_size)
-
-        final_state = torch.cat((context_final_states, sa_final_states, sa_final_states2), 1)
-        if(self.add_cls):
-            final_state = torch.cat([cls_rep, final_state],dim=1)
+        if self.add_mask:
+            final_state = torch.cat((context_final_states, sa_final_states), 1)
+        else:
+            sa_final_states2 = self.gru3(sa_utterance_level2) # (batch_size * num_choice, 2 * hidden_size)
+            final_state = torch.cat((context_final_states, sa_final_states, sa_final_states2), 1)
 
         pooled_output = self.pooler_activation(self.pooler(final_state))
         pooled_output = self.dropout(pooled_output)
@@ -516,7 +526,7 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
 
         return outputs #(loss), reshaped_logits, (hidden_states), (attentions)
 
-class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a query, simple attention
+class ElectraForMultipleChoiceResponse(ElectraPreTrainedModel):#Use response as a query, simple attention
     def __init__(self, config, bidirectional=True):
         super().__init__(config)
         self.electra = ElectraModel(config)
@@ -530,7 +540,7 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
         self.classifier = nn.Linear(config.hidden_size, 1)
         self.classifier2 = nn.Linear(config.hidden_size, 2)
         self.bidirectional = bidirectional
-        self.gru1 = GRUWithPadding(config,bidirectional=bidirectional)
+        self.gru1 = GRUWithPadding(config.hidden_size,bidirectional=bidirectional)
 
         self.init_weights()
         print("bidirectional is: "+str(bidirectional))
@@ -608,7 +618,7 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
             
             tmp1 = torch.cat([sequence_output_dilog,response_utterance],dim=1)
             tmp1 =  self.score(tmp1).squeeze(-1)
-            response_score = F.softmax(tmp1)
+            response_score = F.softmax(tmp1,dim=0)
             response_score = torch.cat([response_score,torch.zeros(SEQ_LEN-response_score.shape[0]).to(self.device)])
             weighted_output.append(sequence_output[i]*(response_score.unsqueeze(1).repeat([1,sequence_output.shape[-1]])).unsqueeze(0))
 
@@ -624,9 +634,192 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
             last_sep = last_sep - 1
             last_seps.append(last_sep)
             
-        context_word_level = sequence_output
+        context_word_level = weighted_output
         context_utterance_level = []
-        for i in range(sequence_output.size(0)):
+        for i in range(weighted_output.size(0)):
+            context_utterances = [torch.max(context_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
+            for j in range(1, last_seps[i] + 1):
+                current_context_utter, _ = torch.max(context_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
+                context_utterances.append(current_context_utter)
+            context_utterance_level.append(torch.cat(context_utterances, dim = 0)) # (batch_size, utterances, hidden_size)
+        feature = self.gru1(context_utterance_level) 
+
+
+        pooled_output = self.pooler_activation(self.pooler(feature))
+        pooled_output = self.dropout(pooled_output)
+        
+        if num_labels > 2:
+            logits = self.classifier(pooled_output)
+        else:
+            logits = self.classifier2(pooled_output)
+
+        reshaped_logits = logits.view(-1, num_labels) if num_labels > 2 else logits
+
+        outputs = (reshaped_logits,) + outputs[2:]  # add hidden states and attention if they are here
+
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
+            outputs = (loss,) + outputs
+
+        return outputs #(loss), reshaped_logits, (hidden_states), (attentions)
+
+    @property
+    def device(self):
+        return self.pooler.weight.device
+
+class ElectraForMultipleChoiceBiDAF(ElectraPreTrainedModel):#Use biDAF
+    def __init__(self, config, bidirectional=False):
+        super().__init__(config)
+        self.electra = ElectraModel(config)
+        feature_dim = config.hidden_size*4
+        if bidirectional:
+            feature_dim *= 2
+
+        #Attention Flow Layer
+        self.att_weight_c = nn.Linear(config.hidden_size, 1)
+        self.att_weight_q = nn.Linear(config.hidden_size, 1)
+        self.att_weight_cq = nn.Linear(config.hidden_size, 1)
+
+        self.pooler = nn.Linear(feature_dim, config.hidden_size)
+        self.pooler_activation = nn.Tanh()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.classifier2 = nn.Linear(config.hidden_size, 2)
+        self.bidirectional = bidirectional
+        self.gru1 = GRUWithPadding(config.hidden_size*4,bidirectional=bidirectional)
+
+        self.init_weights()
+        print("bidirectional is: "+str(bidirectional))
+
+
+    def forward(
+        self,
+        input_ids=None,
+        token_type_ids=None,
+        attention_mask=None,
+        sep_pos = None,
+        position_ids=None,
+        turn_ids = None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+    ):
+        def att_flow_layer(c, q):
+            """
+            :param c: (batch, c_len, hidden_size * 2)
+            :param q: (batch, q_len, hidden_size * 2)
+            :return: (batch, c_len, q_len)
+            """
+            c_len = c.size(1)
+            q_len = q.size(1)
+
+            cq = []
+            for i in range(q_len):
+                #(batch, 1, hidden_size)
+                qi = q.select(1, i).unsqueeze(1)
+                #(batch, c_len, 1)
+                ci = self.att_weight_cq(c * qi).squeeze()
+                cq.append(ci)
+            # (batch, c_len, q_len)
+            cq = torch.stack(cq, dim=-1)
+            if(cq.dim()==2):
+                cq = cq.unsqueeze(0)
+
+            # (batch, c_len, q_len)
+            s = self.att_weight_c(c).expand(-1, -1, q_len) + \
+                self.att_weight_q(q).permute(0, 2, 1).expand(-1, c_len, -1) + \
+                cq
+
+            # (batch, c_len, q_len)
+            a = F.softmax(s, dim=2)
+            # (batch, c_len, q_len) * (batch, q_len, hidden_size) -> (batch, c_len, hidden_size)
+            c2q_att = torch.bmm(a, q)
+            # (batch, 1, c_len)
+            b = F.softmax(torch.max(s, dim=2)[0], dim=1).unsqueeze(1)
+            # (batch, 1, c_len) * (batch, c_len, hidden_size) -> (batch, hidden_size)
+            q2c_att = torch.bmm(b, c).squeeze(1)
+            # (batch, c_len, hidden_size) (tiled)
+            q2c_att = q2c_att.unsqueeze(1).expand(-1, c_len, -1)
+            # q2c_att = torch.stack([q2c_att] * c_len, dim=1)
+
+            # (batch, c_len, hidden_size * 4)
+            x = torch.cat([c, c2q_att, c * c2q_att, c * q2c_att], dim=-1)
+            return x
+            
+        num_labels = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
+
+        input_ids = input_ids.view(-1, input_ids.size(-1)) if input_ids is not None else None 
+        attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        # (batch_size * choice, seq_len)
+
+        
+        token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        
+        B = token_type_ids.shape[0]
+        SEQ_LEN = token_type_ids.shape[1]
+        response_index =[(token_type_ids[i]!=0).nonzero() for i in range(B)]
+        contex_ids = (1-token_type_ids)*attention_mask
+        contex_index = [(contex_ids[i]!=0).nonzero() for i in range(B)]
+        
+        sep_pos = sep_pos.view(-1, sep_pos.size(-1)) if sep_pos is not None else None
+        turn_ids = turn_ids.view(-1, turn_ids.size(-1)) if turn_ids is not None else None
+        
+        turn_ids = turn_ids.unsqueeze(-1).repeat([1,1,turn_ids.size(1)])
+        
+        position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+        inputs_embeds = (
+            inputs_embeds.view(-1, inputs_embeds.size(-2), inputs_embeds.size(-1))
+            if inputs_embeds is not None
+            else None
+        )
+        attention_mask = attention_mask.unsqueeze(1).unsqueeze(2) # (batch_size * num_choice, 1, 1, seq_len)
+        attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+
+        attention_mask = (1.0 - attention_mask) * -10000.0
+
+        outputs = self.electra(
+            input_ids,
+            attention_mask=attention_mask.squeeze(1),
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+        sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
+        cls_rep = sequence_output[:,0]
+        
+        weighted_output = []
+        for i in range(B):
+            r_index = response_index[i].expand(-1,sequence_output.shape[-1])
+            sequence_output_response = torch.gather(sequence_output[i], index=r_index, dim=0).unsqueeze(0) #[1,response_len,hidden_size]
+            c_index = contex_index[i].expand(-1,sequence_output.shape[-1])
+            sequence_output_contex = torch.gather(sequence_output[i], index=c_index, dim=0).unsqueeze(0) #[1,context_len,hidden_size]
+                           
+            context_att =  att_flow_layer(sequence_output_contex, sequence_output_response).squeeze(0)
+            context_att = torch.cat([context_att,torch.zeros(SEQ_LEN-context_att.shape[0],context_att.shape[1]).to(self.device)])
+            weighted_output.append(context_att.unsqueeze(0))
+
+        weighted_output = torch.cat(weighted_output,dim=0)
+        
+        last_seps = []
+        for i in range(input_ids.size(0)):
+            last_sep = 1
+
+            while last_sep < len(sep_pos[i]) and sep_pos[i][last_sep] != 0: 
+                last_sep += 1
+            
+            last_sep = last_sep - 1
+            last_seps.append(last_sep)
+            
+        context_word_level = weighted_output
+        context_utterance_level = []
+        for i in range(weighted_output.size(0)):
             context_utterances = [torch.max(context_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
             for j in range(1, last_seps[i] + 1):
                 current_context_utter, _ = torch.max(context_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)

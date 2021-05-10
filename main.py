@@ -41,7 +41,7 @@ from transformers import (BertConfig, BertForMultipleChoice, BertTokenizer,
                             ElectraConfig, ElectraTokenizer, RobertaConfig, RobertaTokenizer, RobertaForMultipleChoice)
 from modeling import (BertBaseline, RobertaBaseline, BertForMultipleChoicePlus, RobertaForMultipleChoicePlus)
 from modeling.model import ElectraForMultipleChoice as Baseline
-from modeling.model import ElectraForMultipleChoicePlus as ElectraForMultipleChoicePlus
+
 
 from transformers import (AdamW, WEIGHTS_NAME, CONFIG_NAME)
 import re
@@ -49,11 +49,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-MODEL_CLASSES = {
-    'bert': (BertConfig, BertForMultipleChoicePlus, BertTokenizer),
-    'roberta': (RobertaConfig, RobertaForMultipleChoicePlus, RobertaTokenizer),
-    'electra': (ElectraConfig, ElectraForMultipleChoicePlus, ElectraTokenizer)
-}
+
 
 def select_field(features, field):
     return [
@@ -609,6 +605,9 @@ def main():
     parser.add_argument("--response_aware",
                         action='store_true',
                         help="Whether not to use response aware decouple")
+    parser.add_argument("--BiDAF",
+                        action='store_true',
+                        help="Whether not to use biDAF")
     parser.add_argument("--data_dir",
                         default='../../../MuTual/data/mutual',
                         type=str,
@@ -716,6 +715,19 @@ def main():
     parser.add_argument('--server_ip', type=str, default='', help="Can be used for distant debugging.")
     parser.add_argument('--server_port', type=str, default='', help="Can be used for distant debugging.")
     args = parser.parse_args()
+
+    if args.response_aware:
+        from modeling.model import ElectraForMultipleChoiceResponse as ElectraForMultipleChoicePlus
+    elif args.BiDAF:
+        from modeling.model import ElectraForMultipleChoiceBiDAF as ElectraForMultipleChoicePlus
+    else:
+        from modeling.model import ElectraForMultipleChoiceDecouple as ElectraForMultipleChoicePlus
+
+    MODEL_CLASSES = {
+        'bert': (BertConfig, BertForMultipleChoicePlus, BertTokenizer),
+        'roberta': (RobertaConfig, RobertaForMultipleChoicePlus, RobertaTokenizer),
+        'electra': (ElectraConfig, ElectraForMultipleChoicePlus, ElectraTokenizer)
+    }
 
     if args.server_ip and args.server_port:
         # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
@@ -955,6 +967,8 @@ def main():
                     token_type_ids = batch[4]%2
                 if args.response_aware:
                     token_type_ids = batch[2]
+                if args.BiDAF:
+                    token_type_ids = batch[2]
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': token_type_ids,
@@ -1019,6 +1033,8 @@ def main():
                     if args.speaker_aware:
                         token_type_ids = batch[4]%2
                     if args.response_aware:
+                        token_type_ids = batch[2]
+                    if args.BiDAF:
                         token_type_ids = batch[2]
                     inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
