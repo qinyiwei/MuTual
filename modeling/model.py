@@ -517,7 +517,7 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
         return outputs #(loss), reshaped_logits, (hidden_states), (attentions)
 
 class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a query, simple attention
-    def __init__(self, config, bidirectional=False):
+    def __init__(self, config, bidirectional=True):
         super().__init__(config)
         self.electra = ElectraModel(config)
         feature_dim = config.hidden_size
@@ -596,6 +596,7 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
         sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
         cls_rep = sequence_output[:,0]
         
+        weighted_output = []
         for i in range(B):
             r_index = response_index[i].expand(-1,sequence_output.shape[-1])
             sequence_output_response = torch.gather(sequence_output[i], index=r_index, dim=0)
@@ -609,8 +610,9 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
             tmp1 =  self.score(tmp1).squeeze(-1)
             response_score = F.softmax(tmp1)
             response_score = torch.cat([response_score,torch.zeros(SEQ_LEN-response_score.shape[0]).to(self.device)])
-            sequence_output[i] = sequence_output[i]*(response_score.unsqueeze(1).repeat([1,sequence_output.shape[-1]]))
+            weighted_output.append(sequence_output[i]*(response_score.unsqueeze(1).repeat([1,sequence_output.shape[-1]])).unsqueeze(0))
 
+        weighted_output = torch.cat(weighted_output,dim=0)
         
         last_seps = []
         for i in range(input_ids.size(0)):
