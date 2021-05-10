@@ -606,6 +606,9 @@ def main():
     parser.add_argument("--speaker_aware",
                         action='store_true',
                         help="Whether not to use speaker aware embedding")
+    parser.add_argument("--response_aware",
+                        action='store_true',
+                        help="Whether not to use response aware decouple")
     parser.add_argument("--data_dir",
                         default='../../../MuTual/data/mutual',
                         type=str,
@@ -947,7 +950,11 @@ def main():
             nb_tr_steps = 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
-                token_type_ids = batch[4]%2 if args.speaker_aware else None
+                token_type_ids = None
+                if args.speaker_aware:
+                    token_type_ids = batch[4]%2
+                if args.response_aware:
+                    token_type_ids = batch[2]
                 inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': token_type_ids,
@@ -1008,7 +1015,11 @@ def main():
                 batch = tuple(t.to(device) for t in batch)
 
                 with torch.no_grad():
-                    token_type_ids = batch[4]%2 if args.speaker_aware else None
+                    token_type_ids = None
+                    if args.speaker_aware:
+                        token_type_ids = batch[4]%2
+                    if args.response_aware:
+                        token_type_ids = batch[2]
                     inputs = {'input_ids': batch[0],
                           'attention_mask': batch[1],
                           'token_type_ids': token_type_ids,

@@ -341,7 +341,7 @@ class ElectraForMultipleChoiceOther(ElectraPreTrainedModel):
     def device(self):
         return self.pooler.weight.device
 
-class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
+class ElectraForMultipleChoice(ElectraPreTrainedModel):#SA decouple + GRU
     def __init__(self, config, num_rnn = 1,bidirectional=True,add_cls=False):
         super().__init__(config)
 
@@ -515,6 +515,146 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):
             outputs = (loss,) + outputs
 
         return outputs #(loss), reshaped_logits, (hidden_states), (attentions)
+
+class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a query, simple attention
+    def __init__(self, config, bidirectional=False):
+        super().__init__(config)
+        self.electra = ElectraModel(config)
+        feature_dim = config.hidden_size
+        if bidirectional:
+            feature_dim += config.hidden_size
+        self.score = nn.Linear(2*config.hidden_size,1)
+        self.pooler = nn.Linear(feature_dim, config.hidden_size)
+        self.pooler_activation = nn.Tanh()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.classifier2 = nn.Linear(config.hidden_size, 2)
+        self.bidirectional = bidirectional
+        self.gru1 = GRUWithPadding(config,bidirectional=bidirectional)
+
+        self.init_weights()
+        print("bidirectional is: "+str(bidirectional))
+
+
+    def forward(
+        self,
+        input_ids=None,
+        token_type_ids=None,
+        attention_mask=None,
+        sep_pos = None,
+        position_ids=None,
+        turn_ids = None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+    ):
+        num_labels = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
+
+        input_ids = input_ids.view(-1, input_ids.size(-1)) if input_ids is not None else None 
+        attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        # (batch_size * choice, seq_len)
+
+        
+        token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        
+        B = token_type_ids.shape[0]
+        SEQ_LEN = token_type_ids.shape[1]
+        #response_ids = token_type_ids!=0
+        response_index =[(token_type_ids[i]!=0).nonzero() for i in range(B)]
+        #dilog_ids = attention_mask!=0
+        dilog_index = [(attention_mask[i]!=0).nonzero() for i in range(B)]
+        
+        sep_pos = sep_pos.view(-1, sep_pos.size(-1)) if sep_pos is not None else None
+        turn_ids = turn_ids.view(-1, turn_ids.size(-1)) if turn_ids is not None else None
+        
+        turn_ids = turn_ids.unsqueeze(-1).repeat([1,1,turn_ids.size(1)])
+        
+        position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+        inputs_embeds = (
+            inputs_embeds.view(-1, inputs_embeds.size(-2), inputs_embeds.size(-1))
+            if inputs_embeds is not None
+            else None
+        )
+        attention_mask = attention_mask.unsqueeze(1).unsqueeze(2) # (batch_size * num_choice, 1, 1, seq_len)
+        attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
+
+        attention_mask = (1.0 - attention_mask) * -10000.0
+
+        outputs = self.electra(
+            input_ids,
+            attention_mask=attention_mask.squeeze(1),
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+
+        sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
+        cls_rep = sequence_output[:,0]
+        
+        response_score = torch.zeros(B,SEQ_LEN).to(self.device)
+        for i in range(B):
+            r_index = response_index[i].expand(-1,sequence_output.shape[-1])
+            sequence_output_response = torch.gather(sequence_output[i], index=r_index, dim=0)
+            d_index = dilog_index[i].expand(-1,sequence_output.shape[-1])
+            sequence_output_dilog = torch.gather(sequence_output[i], index=d_index, dim=0)
+                           
+            response_utterance = torch.max(sequence_output_response, dim=0, keepdim=True)[0]
+            response_utterance = response_utterance.repeat([sequence_output_dilog.shape[0],1])
+            
+            tmp1 = torch.cat([sequence_output_dilog,response_utterance],dim=1)
+            tmp1 =  self.score(tmp1).squeeze(-1)
+            response_score[i][:tmp1.shape[0]] = F.softmax(tmp1)
+            sequence_output[i] = sequence_output[i]*(response_score[i].unsqueeze(1).repeat([1,sequence_output.shape[-1]]))
+
+        
+        last_seps = []
+        for i in range(input_ids.size(0)):
+            last_sep = 1
+
+            while last_sep < len(sep_pos[i]) and sep_pos[i][last_sep] != 0: 
+                last_sep += 1
+            
+            last_sep = last_sep - 1
+            last_seps.append(last_sep)
+            
+        context_word_level = sequence_output
+        context_utterance_level = []
+        for i in range(sequence_output.size(0)):
+            context_utterances = [torch.max(context_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
+            for j in range(1, last_seps[i] + 1):
+                current_context_utter, _ = torch.max(context_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
+                context_utterances.append(current_context_utter)
+            context_utterance_level.append(torch.cat(context_utterances, dim = 0)) # (batch_size, utterances, hidden_size)
+        feature = self.gru1(context_utterance_level) 
+
+
+        pooled_output = self.pooler_activation(self.pooler(feature))
+        pooled_output = self.dropout(pooled_output)
+        
+        if num_labels > 2:
+            logits = self.classifier(pooled_output)
+        else:
+            logits = self.classifier2(pooled_output)
+
+        reshaped_logits = logits.view(-1, num_labels) if num_labels > 2 else logits
+
+        outputs = (reshaped_logits,) + outputs[2:]  # add hidden states and attention if they are here
+
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
+            outputs = (loss,) + outputs
+
+        return outputs #(loss), reshaped_logits, (hidden_states), (attentions)
+
+    @property
+    def device(self):
+        return self.pooler.weight.device
 
 class FuseLayer(nn.Module):
     def __init__(self, config):
