@@ -143,7 +143,7 @@ class ElectraForMultipleChoice(ElectraPreTrainedModel):
 
             feature = self.gru(context_utterance_level)
         else:
-            feature = sequence_output
+            feature = sequence_output[:,0]
 
         if(self.add_cls):
             feature = torch.cat([cls_rep, feature],dim=1)
