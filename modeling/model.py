@@ -596,7 +596,6 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
         sequence_output = outputs[0] # (batch_size * num_choice, seq_len, hidden_size)
         cls_rep = sequence_output[:,0]
         
-        response_score = torch.zeros(B,SEQ_LEN).to(self.device)
         for i in range(B):
             r_index = response_index[i].expand(-1,sequence_output.shape[-1])
             sequence_output_response = torch.gather(sequence_output[i], index=r_index, dim=0)
@@ -608,8 +607,9 @@ class ElectraForMultipleChoicePlus(ElectraPreTrainedModel):#Use response as a qu
             
             tmp1 = torch.cat([sequence_output_dilog,response_utterance],dim=1)
             tmp1 =  self.score(tmp1).squeeze(-1)
-            response_score[i][:tmp1.shape[0]] = F.softmax(tmp1)
-            sequence_output[i] = sequence_output[i]*(response_score[i].unsqueeze(1).repeat([1,sequence_output.shape[-1]]))
+            response_score = F.softmax(tmp1)
+            response_score = torch.cat([response_score,torch.zeros(SEQ_LEN-response_score.shape[0]).to(self.device)])
+            sequence_output[i] = sequence_output[i]*(response_score.unsqueeze(1).repeat([1,sequence_output.shape[-1]]))
 
         
         last_seps = []
