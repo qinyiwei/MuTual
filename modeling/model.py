@@ -44,7 +44,7 @@ class GRUWithPadding(nn.Module):
         return output
     
 class ElectraForMultipleChoice(ElectraPreTrainedModel):
-    def __init__(self, config, add_GRU= True, bidirectional=True, add_cls = True):
+    def __init__(self, config, add_GRU= False, bidirectional=False, add_cls = False):
         super().__init__(config)
         self.electra = ElectraModel(config)
         feature_dim = config.hidden_size
@@ -342,7 +342,7 @@ class ElectraForMultipleChoiceOther(ElectraPreTrainedModel):
         return self.pooler.weight.device
 
 class ElectraForMultipleChoiceDecouple(ElectraPreTrainedModel):#SA decouple + GRU
-    def __init__(self, config, num_rnn = 1,bidirectional=True, add_mask = True):
+    def __init__(self, config, num_rnn = 1,bidirectional=False):
         super().__init__(config)
 
         self.electra = ElectraModel(config)
@@ -353,13 +353,9 @@ class ElectraForMultipleChoiceDecouple(ElectraPreTrainedModel):#SA decouple + GR
         
         self.gru1 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
         self.gru2 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
-        if not add_mask:
-            self.gru3 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
+        self.gru3 = GRUWithPadding(config.hidden_size, num_rnn, bidirectional)
 
-        if add_mask:
-            feature_dim = config.hidden_size * 2
-        else:
-            feature_dim = config.hidden_size * 3
+        feature_dim = config.hidden_size * 3
 
         if bidirectional:
             feature_dim *= 2
@@ -370,9 +366,7 @@ class ElectraForMultipleChoiceDecouple(ElectraPreTrainedModel):#SA decouple + GR
         self.classifier2 = nn.Linear(config.hidden_size, 2)
 
         self.bidirectional = bidirectional
-        self.add_mask = add_mask
         print("bidirectional is: "+str(bidirectional))
-        print("add_mask is: "+str(add_mask))
         
         self.init_weights()
 
@@ -466,46 +460,37 @@ class ElectraForMultipleChoiceDecouple(ElectraPreTrainedModel):#SA decouple + GR
 
 
         context_word_level = sequence_output
-        if self.add_mask:
-            sa_word_level = sa_self_word_level+sa_cross_word_level
-        else:
-            sa_word_level = sa_self_word_level
-            sa_word_level2 = sa_cross_word_level
+
+        sa_word_level = sa_self_word_level
+        sa_word_level2 = sa_cross_word_level
 
         new_batch = []
 
         context_utterance_level = []
         sa_utterance_level = []
-        if not self.add_mask:
-            sa_utterance_level2 = []
+        sa_utterance_level2 = []
 
         for i in range(sequence_output.size(0)):
             context_utterances = [torch.max(context_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
             sa_utterances = [torch.max(sa_word_level[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
-            if not self.add_mask:
-                sa_utterances2 = [torch.max(sa_word_level2[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
+            sa_utterances2 = [torch.max(sa_word_level2[i, :(sep_pos[i][0] + 1)], dim = 0, keepdim = True)[0]]
 
             for j in range(1, last_seps[i] + 1):
                 current_context_utter, _ = torch.max(context_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
                 current_sa_utter, _ = torch.max(sa_word_level[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
                 context_utterances.append(current_context_utter)
                 sa_utterances.append(current_sa_utter)
-                if not self.add_mask:
-                    current_sa_utter2, _ = torch.max(sa_word_level2[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
-                    sa_utterances2.append(current_sa_utter2)
+                current_sa_utter2, _ = torch.max(sa_word_level2[i, (sep_pos[i][j-1] + 1):(sep_pos[i][j] + 1)], dim = 0, keepdim = True)
+                sa_utterances2.append(current_sa_utter2)
 
             context_utterance_level.append(torch.cat(context_utterances, dim = 0)) # (batch_size, utterances, hidden_size)
             sa_utterance_level.append(torch.cat(sa_utterances, dim = 0))
-            if not self.add_mask:
-                sa_utterance_level2.append(torch.cat(sa_utterances2, dim = 0))
+            sa_utterance_level2.append(torch.cat(sa_utterances2, dim = 0))
 
         context_final_states = self.gru1(context_utterance_level) 
         sa_final_states = self.gru2(sa_utterance_level) # (batch_size * num_choice, 2 * hidden_size)
-        if self.add_mask:
-            final_state = torch.cat((context_final_states, sa_final_states), 1)
-        else:
-            sa_final_states2 = self.gru3(sa_utterance_level2) # (batch_size * num_choice, 2 * hidden_size)
-            final_state = torch.cat((context_final_states, sa_final_states, sa_final_states2), 1)
+        sa_final_states2 = self.gru3(sa_utterance_level2) # (batch_size * num_choice, 2 * hidden_size)
+        final_state = torch.cat((context_final_states, sa_final_states, sa_final_states2), 1)
 
         pooled_output = self.pooler_activation(self.pooler(final_state))
         pooled_output = self.dropout(pooled_output)
