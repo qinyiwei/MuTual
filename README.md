@@ -103,4 +103,19 @@ python main.py \
 --learning_rate 4e-6 --num_train_epochs 6\
 --gradient_accumulation_steps 1 --local_rank -1
 ```
-
+- To run the Topic-Aware Representation
+```
+python3 run_ELECTRA_topic.py
+--do_topic 
+--data_dir datasets/mutual 
+--model_name_or_path google/electra-large-discriminator 
+--model_type electra 
+--task_name mutual 
+--output_dir output_mutual_topic_att 
+--cache_dir cached_models 
+--max_seq_length 256 
+--do_train --do_eval 
+--train_batch_size 4 --eval_batch_size 4 
+--learning_rate 4e-6 --num_train_epochs 3 
+--gradient_accumulation_steps 1 --local_rank -1 
+```
