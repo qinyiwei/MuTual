@@ -38,14 +38,69 @@ google/electra-large-discriminator \
 --cache_dir cached_models \
 ```
 
-## Reference
-If you use this code please cite the original paper:
+- To run the Speaker-Aware Embedding
+```
+python main.py \
+--data_dir datasets/mutual \
+--model_name_or_path google/electra-large-discriminator \
+--model_type electra \
+--task_name mutual \
+--output_dir output_mutual_electra \
+--cache_dir cached_models \
+--max_seq_length 256 \
+--do_train --do_eval \
+--train_batch_size 2 --eval_batch_size 2 \
+--learning_rate 4e-6 --num_train_epochs 6\
+--gradient_accumulation_steps 1 --local_rank -1
+```
 
+- To run the Speaker-Aware Decouple
 ```
-@inproceedings{liu2021filling,
-  title={Filling the Gap of Utterance-aware and Speaker-aware Representation for Multi-turn Dialogue},
-  author={Liu, Longxiang and Zhang, Zhuosheng and and Zhao, Hai and Zhou, Xi and Zhou, Xiang},
-  booktitle={The Thirty-Fifth AAAI Conference on Artificial Intelligence (AAAI-21)},
-  year={2021}
-}
+python main.py \
+--baseline\
+--speaker_aware\
+--data_dir datasets/mutual \
+--model_name_or_path google/electra-large-discriminator \
+--model_type electra \
+--task_name mutual \
+--output_dir output_mutual_electra \
+--cache_dir cached_models \
+--max_seq_length 256 \
+--do_train --do_eval \
+--train_batch_size 2 --eval_batch_size 2 \
+--learning_rate 4e-6 --num_train_epochs 6\
+--gradient_accumulation_steps 1 --local_rank -1
 ```
+- To run the Response-Aware Query
+```
+python main.py \
+--response_aware\
+--data_dir datasets/mutual \
+--model_name_or_path google/electra-large-discriminator \
+--model_type electra \
+--task_name mutual \
+--output_dir output_mutual_electra \
+--cache_dir cached_models \
+--max_seq_length 256 \
+--do_train --do_eval \
+--train_batch_size 2 --eval_batch_size 2 \
+--learning_rate 4e-6 --num_train_epochs 6\
+--gradient_accumulation_steps 1 --local_rank -1
+```
+- To run the Response-Aware BiDAF
+```
+python main.py \
+--BiDAF\
+--data_dir datasets/mutual \
+--model_name_or_path google/electra-large-discriminator \
+--model_type electra \
+--task_name mutual \
+--output_dir output_mutual_electra \
+--cache_dir cached_models \
+--max_seq_length 256 \
+--do_train --do_eval \
+--train_batch_size 2 --eval_batch_size 2 \
+--learning_rate 4e-6 --num_train_epochs 6\
+--gradient_accumulation_steps 1 --local_rank -1
+```
+
