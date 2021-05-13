@@ -41,8 +41,8 @@ google/electra-large-discriminator \
 - To run the Speaker-Aware Embedding
 ```
 python main.py \
---baseline\
---speaker_aware\
+--baseline \
+--speaker_aware \
 --data_dir datasets/mutual \
 --model_name_or_path google/electra-large-discriminator \
 --model_type electra \
@@ -74,7 +74,7 @@ python main.py \
 - To run the Response-Aware Query
 ```
 python main.py \
---response_aware\
+--response_aware \
 --data_dir datasets/mutual \
 --model_name_or_path google/electra-large-discriminator \
 --model_type electra \
@@ -90,7 +90,7 @@ python main.py \
 - To run the Response-Aware BiDAF
 ```
 python main.py \
---BiDAF\
+--BiDAF \
 --data_dir datasets/mutual \
 --model_name_or_path google/electra-large-discriminator \
 --model_type electra \
