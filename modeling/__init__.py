@@ -5,3 +5,4 @@ from .modeling_baseline import ElectraForMultipleChoicePlus as Baseline
 from .modeling_baseline import BertForMultipleChoicePlus as BertBaseline
 from .modeling_baseline import RobertaForMultipleChoicePlus as RobertaBaseline
 from .modeling_baseline_topic import ElectraForMultipleChoicePlus as BaselineTopic
+from .modeling_baseline_gru import ElectraForMultipleChoicePlus as BaselineGRU
